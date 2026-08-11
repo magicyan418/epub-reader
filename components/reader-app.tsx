@@ -401,6 +401,8 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const locationsPromiseRef = useRef<Promise<void> | null>(null);
   const currentCfiRef = useRef("");
   const flatTocRef = useRef<EpubTocItem[]>([]);
+  const appearanceRef = useRef({ dark, fontSize });
+  appearanceRef.current = { dark, fontSize };
   const [book, setBook] = useState<StoredEpubBook | null>(null);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -512,14 +514,18 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         });
         renditionRef.current = rendition;
         locationsPromiseRef.current = epub.locations.generate(1200).then(() => undefined);
-        rendition.on("rendered", () => window.requestAnimationFrame(() => applyFrameStyles(dark, fontSize)));
+        rendition.on("rendered", () => window.requestAnimationFrame(() => {
+          const appearance = appearanceRef.current;
+          applyFrameStyles(appearance.dark, appearance.fontSize);
+        }));
         rendition.on("relocated", (location: EpubLocation) => {
           if (!active) return;
           syncReadingLocation(location);
         });
         await rendition.display(stored.location ?? undefined);
         if (!active) return;
-        applyFrameStyles(dark, fontSize);
+        const appearance = appearanceRef.current;
+        applyFrameStyles(appearance.dark, appearance.fontSize);
         setLoading(false);
       } catch (reason) {
         if (!active) return;
