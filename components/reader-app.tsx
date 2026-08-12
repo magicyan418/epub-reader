@@ -403,8 +403,9 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const flatTocRef = useRef<EpubTocItem[]>([]);
   const pendingTocHrefRef = useRef<string | null>(null);
   const tocListRef = useRef<HTMLElement>(null);
-  const appearanceRef = useRef({ dark, fontSize });
-  appearanceRef.current = { dark, fontSize };
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const downWheelHandlerRef = useRef<((event: WheelEvent) => void) | null>(null);
+  const frameWheelHandlersRef = useRef<Array<{ document: Document; handler: (event: WheelEvent) => void }>>([]);
   const [book, setBook] = useState<StoredEpubBook | null>(null);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -432,31 +433,46 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     return a === e || a.endsWith(e) || e.endsWith(a);
   }
 
-  function applyFrameStyles(nextDark: boolean, nextFontSize: number) {
+  function applyRenditionTheme(rendition: EpubRendition, nextDark: boolean, nextFontSize: number) {
     const foreground = nextDark ? "#e9e9e7" : "#17191c";
     const background = nextDark ? "#1d1f21" : "#f7f8fa";
-    stageRef.current?.querySelectorAll("iframe").forEach((frame) => {
+    rendition.themes.register("luna-reader", {
+      "html, body": { color: `${foreground} !important`, background: `${background} !important`, "overflow-x": "hidden !important" },
+      body: { width: "100% !important", "max-width": "760px !important", margin: "0 auto !important", "box-sizing": "border-box !important", "overflow-wrap": "anywhere !important", "font-family": "Georgia, 'Noto Serif SC', serif !important", "font-size": `${nextFontSize}px !important`, "line-height": "1.85 !important", padding: "40px 36px 80px !important" },
+      "body *": { color: `${foreground} !important`, "background-color": "transparent !important" },
+      "body pre, body table": { "max-width": "100% !important", "white-space": "pre-wrap !important", "overflow-wrap": "anywhere !important" },
+      "body a": { color: `${nextDark ? "#b8b9ff" : "#4648d4"} !important` },
+      "body img, body svg": { "max-width": "100% !important", "object-fit": "contain !important" },
+      "body input, body textarea": { color: `${foreground} !important`, background: `${background} !important` },
+    });
+    rendition.themes.select("luna-reader");
+  }
+
+  function installDownwardPrefetch(rendition: EpubRendition) {
+    const container = stageRef.current?.querySelector<HTMLElement>(".epub-container");
+    const managerSettings = rendition.manager?.settings;
+    if (!container || !managerSettings) return;
+
+    if (!scrollContainerRef.current) {
+      const handleDownWheel = (event: WheelEvent) => {
+        if (event.deltaY <= 0) return;
+        managerSettings.offset = 300;
+      };
+      container.addEventListener("wheel", handleDownWheel, { passive: true });
+      scrollContainerRef.current = container;
+      downWheelHandlerRef.current = handleDownWheel;
+    }
+
+    stageRef.current?.querySelectorAll<HTMLIFrameElement>("iframe").forEach((frame) => {
       const document = frame.contentDocument;
-      if (!document) return;
-      let style = document.getElementById("luna-reader-theme") as HTMLStyleElement | null;
-      if (!style) {
-        const styleHost = document.head ?? document.documentElement;
-        if (!styleHost) return;
-        style = document.createElement("style");
-        style.id = "luna-reader-theme";
-        styleHost.appendChild(style);
-      }
-      style.textContent = `
-        html, body { color: ${foreground} !important; background: ${background} !important; }
-        body { width: 100% !important; max-width: 760px !important; margin: 0 auto !important; box-sizing: border-box !important; overflow-x: hidden !important; overflow-wrap: anywhere !important; font-family: Georgia, 'Noto Serif SC', serif !important; font-size: ${nextFontSize}px !important; line-height: 1.85 !important; padding: 40px 36px 80px !important; }
-        body * { color: ${foreground} !important; background-color: transparent !important; }
-        body pre, body table { max-width: 100% !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; }
-        body a { color: ${nextDark ? "#b8b9ff" : "#4648d4"} !important; }
-        body img, body svg { max-width: 100% !important; object-fit: contain !important; }
-        body input, body textarea { color: ${foreground} !important; background: ${background} !important; }
-      `;
-      document.documentElement.style.colorScheme = nextDark ? "dark" : "light";
-      frame.style.backgroundColor = background;
+      if (!document || frame.dataset.downPrefetchBound === "true") return;
+      const handler = (event: WheelEvent) => {
+        if (event.deltaY <= 0) return;
+        managerSettings.offset = 300;
+      };
+      document.addEventListener("wheel", handler, { passive: true });
+      frame.dataset.downPrefetchBound = "true";
+      frameWheelHandlersRef.current.push({ document, handler });
     });
   }
 
@@ -535,27 +551,22 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
           width: "100%",
           height: "100%",
           flow: "scrolled",
-          // Keep one spine item mounted at a time. Continuous manager retains
-          // neighboring views and can restore their old scroll offset when a
-          // TOC link is displayed, which makes chapter jumps land at the end.
-          manager: "default",
+          manager: "continuous",
+          offset: 0,
           spread: "none",
           allowScriptedContent: false,
         });
         renditionRef.current = rendition;
+        applyRenditionTheme(rendition, dark, fontSize);
         locationsPromiseRef.current = epub.locations.generate(1200).then(() => undefined);
-        rendition.on("rendered", () => window.requestAnimationFrame(() => {
-          const appearance = appearanceRef.current;
-          applyFrameStyles(appearance.dark, appearance.fontSize);
-        }));
         rendition.on("relocated", (location: EpubLocation) => {
           if (!active) return;
           syncReadingLocation(location);
         });
+        rendition.on("rendered", () => installDownwardPrefetch(rendition));
         await rendition.display(stored.location ?? undefined);
         if (!active) return;
-        const appearance = appearanceRef.current;
-        applyFrameStyles(appearance.dark, appearance.fontSize);
+        installDownwardPrefetch(rendition);
         setLoading(false);
       } catch (reason) {
         if (!active) return;
@@ -572,13 +583,21 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
       locationsPromiseRef.current = null;
       currentCfiRef.current = "";
       flatTocRef.current = [];
+      if (scrollContainerRef.current && downWheelHandlerRef.current) {
+        scrollContainerRef.current.removeEventListener("wheel", downWheelHandlerRef.current);
+      }
+      frameWheelHandlersRef.current.forEach(({ document, handler }) => document.removeEventListener("wheel", handler));
+      scrollContainerRef.current = null;
+      downWheelHandlerRef.current = null;
+      frameWheelHandlersRef.current = [];
       try { epubRef.current?.destroy(); } catch { /* Archive may already be closed. */ }
       epubRef.current = null;
     };
   }, [bookId]);
 
   useEffect(() => {
-    applyFrameStyles(dark, fontSize);
+    const rendition = renditionRef.current;
+    if (rendition) applyRenditionTheme(rendition, dark, fontSize);
   }, [dark, fontSize]);
 
   useEffect(() => {
@@ -652,7 +671,12 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     const navigationId = ++navigationIdRef.current;
     setNavigating(true);
     pendingTocHrefRef.current = item.href;
+    const managerSettings = rendition.manager?.settings;
     try {
+      // Continuous manager keeps neighboring views and their old scroll
+      // offsets. Clear them before a TOC jump so the target starts cleanly.
+      if (managerSettings) managerSettings.offset = 0;
+      rendition.clear();
       await rendition.display(item.href);
     } catch (reason) {
       if (navigationId === navigationIdRef.current) setNavigating(false);

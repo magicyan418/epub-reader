@@ -25,6 +25,7 @@ export type EpubRendition = {
   prev: () => Promise<void>;
   resize: (width?: number | string, height?: number | string) => void;
   currentLocation: () => EpubLocation;
+  clear: () => void;
   destroy: () => void;
   on: {
     (event: "relocated", callback: (value: EpubLocation) => void): void;
@@ -35,6 +36,7 @@ export type EpubRendition = {
     select: (name: string) => void;
     fontSize: (size: string) => void;
   };
+  manager?: { settings?: { offset?: number }; check?: () => Promise<boolean> };
   annotations: {
     highlight: (cfi: string, data?: Record<string, unknown>, callback?: (() => void) | undefined, className?: string, styles?: Record<string, string>) => void;
     remove: (cfi: string, type: "highlight") => void;
