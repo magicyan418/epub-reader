@@ -412,6 +412,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const [searching, setSearching] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [chapterTitle, setChapterTitle] = useState("正在打开...");
+  const [currentTocHref, setCurrentTocHref] = useState("");
   const [progress, setProgress] = useState(0);
   const [chapterProgress, setChapterProgress] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -461,7 +462,10 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
       return href.endsWith(itemHref) || itemHref.endsWith(href);
     });
     const currentChapter = chapterIndex >= 0 ? flatToc[chapterIndex] : undefined;
-    if (currentChapter) setChapterTitle(currentChapter.label.trim());
+    if (currentChapter) {
+      setChapterTitle(currentChapter.label.trim());
+      setCurrentTocHref(currentChapter.href.split("#")[0]);
+    }
 
     const displayed = location.start.displayed;
     const chapterRatio = displayed?.total ? Math.min(1, displayed.page / displayed.total) : 0;
@@ -624,6 +628,11 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     if (window.innerWidth <= 760) setLeftOpen(false);
   }
 
+  function isCurrentTocItem(item: EpubTocItem) {
+    const itemHref = item.href.split("#")[0];
+    return Boolean(currentTocHref) && (currentTocHref.endsWith(itemHref) || itemHref.endsWith(currentTocHref));
+  }
+
   function highlightedExcerpt(text: string) {
     const query = searchQuery.trim();
     if (!query) return text;
@@ -655,7 +664,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         </div>
         {sidebarTab === "toc" ? (
           <nav className="toc-list" aria-label="书籍目录">
-            {flattenToc(toc).map((item, index) => <button key={`${item.href}-${index}`} onClick={() => void openTocItem(item)}>{item.label.trim() || `章节 ${index + 1}`}</button>)}
+            {flattenToc(toc).map((item, index) => <button key={`${item.href}-${index}`} className={isCurrentTocItem(item) ? "active" : ""} aria-current={isCurrentTocItem(item) ? "location" : undefined} onClick={() => void openTocItem(item)}>{item.label.trim() || `章节 ${index + 1}`}</button>)}
             {!toc.length && <p>此 EPUB 没有提供目录。</p>}
           </nav>
         ) : (
