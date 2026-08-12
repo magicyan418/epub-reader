@@ -623,8 +623,9 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   async function openTocItem(item: EpubTocItem) {
     const rendition = renditionRef.current;
     if (!rendition) return;
-    await rendition.display(item.href);
-    syncReadingLocation(rendition.currentLocation());
+    // TOC anchors can point into the end of a chapter. For chapter navigation,
+    // discard the fragment so epub.js starts at the chapter's first page.
+    await rendition.display(item.href.split("#")[0]);
     if (window.innerWidth <= 760) setLeftOpen(false);
   }
 
