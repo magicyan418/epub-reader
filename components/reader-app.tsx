@@ -401,6 +401,8 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const locationsPromiseRef = useRef<Promise<void> | null>(null);
   const currentCfiRef = useRef("");
   const flatTocRef = useRef<EpubTocItem[]>([]);
+  const pendingTocHrefRef = useRef<string | null>(null);
+  const tocListRef = useRef<HTMLElement>(null);
   const appearanceRef = useRef({ dark, fontSize });
   appearanceRef.current = { dark, fontSize };
   const [book, setBook] = useState<StoredEpubBook | null>(null);
@@ -416,7 +418,19 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const [progress, setProgress] = useState(0);
   const [chapterProgress, setChapterProgress] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [navigating, setNavigating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const navigationIdRef = useRef(0);
+
+  function normalizeHref(href: string) {
+    return href.split("#")[0].replace(/^\.\//, "");
+  }
+
+  function hrefMatches(actual: string, expected: string) {
+    const a = normalizeHref(actual);
+    const e = normalizeHref(expected);
+    return a === e || a.endsWith(e) || e.endsWith(a);
+  }
 
   function applyFrameStyles(nextDark: boolean, nextFontSize: number) {
     const foreground = nextDark ? "#e9e9e7" : "#17191c";
@@ -434,8 +448,9 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
       }
       style.textContent = `
         html, body { color: ${foreground} !important; background: ${background} !important; }
-        body { max-width: 760px !important; margin: 0 auto !important; box-sizing: border-box !important; font-family: Georgia, 'Noto Serif SC', serif !important; font-size: ${nextFontSize}px !important; line-height: 1.85 !important; padding: 40px 36px 80px !important; }
+        body { width: 100% !important; max-width: 760px !important; margin: 0 auto !important; box-sizing: border-box !important; overflow-x: hidden !important; overflow-wrap: anywhere !important; font-family: Georgia, 'Noto Serif SC', serif !important; font-size: ${nextFontSize}px !important; line-height: 1.85 !important; padding: 40px 36px 80px !important; }
         body * { color: ${foreground} !important; background-color: transparent !important; }
+        body pre, body table { max-width: 100% !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; }
         body a { color: ${nextDark ? "#b8b9ff" : "#4648d4"} !important; }
         body img, body svg { max-width: 100% !important; object-fit: contain !important; }
         body input, body textarea { color: ${foreground} !important; background: ${background} !important; }
@@ -456,22 +471,30 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     currentCfiRef.current = cfi;
 
     const flatToc = flatTocRef.current;
-    const href = (location.start.href ?? "").split("#")[0];
-    const chapterIndex = flatToc.findIndex((item) => {
-      const itemHref = item.href.split("#")[0];
+    const href = normalizeHref(location.start.href ?? "");
+    const pendingHref = pendingTocHrefRef.current;
+    if (pendingHref && !hrefMatches(href, pendingHref)) return;
+    const chapterIndex = pendingHref
+      ? flatToc.findIndex((item) => item.href === pendingHref)
+      : flatToc.findIndex((item) => normalizeHref(item.href) === href);
+    const resolvedChapterIndex = chapterIndex >= 0 ? chapterIndex : flatToc.findIndex((item) => {
+      const itemHref = normalizeHref(item.href);
       return href.endsWith(itemHref) || itemHref.endsWith(href);
     });
-    const currentChapter = chapterIndex >= 0 ? flatToc[chapterIndex] : undefined;
+    const currentChapter = resolvedChapterIndex >= 0 ? flatToc[resolvedChapterIndex] : undefined;
     if (currentChapter) {
       setChapterTitle(currentChapter.label.trim());
-      setCurrentTocHref(currentChapter.href.split("#")[0]);
+      setCurrentTocHref(pendingHref ?? currentChapter.href);
+    }
+    if (pendingHref) {
+      pendingTocHrefRef.current = null;
     }
 
     const displayed = location.start.displayed;
     const chapterRatio = displayed?.total ? Math.min(1, displayed.page / displayed.total) : 0;
     setChapterProgress(Math.round(chapterRatio * 100));
-    const approximate = flatToc.length && chapterIndex >= 0
-      ? ((chapterIndex + chapterRatio) / flatToc.length) * 100
+    const approximate = flatToc.length && resolvedChapterIndex >= 0
+      ? ((resolvedChapterIndex + chapterRatio) / flatToc.length) * 100
       : progress;
     if (Number.isFinite(approximate)) {
       setProgress(Math.round(approximate));
@@ -512,7 +535,10 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
           width: "100%",
           height: "100%",
           flow: "scrolled",
-          manager: "continuous",
+          // Keep one spine item mounted at a time. Continuous manager retains
+          // neighboring views and can restore their old scroll offset when a
+          // TOC link is displayed, which makes chapter jumps land at the end.
+          manager: "default",
           spread: "none",
           allowScriptedContent: false,
         });
@@ -623,16 +649,34 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   async function openTocItem(item: EpubTocItem) {
     const rendition = renditionRef.current;
     if (!rendition) return;
-    // TOC anchors can point into the end of a chapter. For chapter navigation,
-    // discard the fragment so epub.js starts at the chapter's first page.
-    await rendition.display(item.href.split("#")[0]);
+    const navigationId = ++navigationIdRef.current;
+    setNavigating(true);
+    pendingTocHrefRef.current = item.href;
+    try {
+      await rendition.display(item.href);
+    } catch (reason) {
+      if (navigationId === navigationIdRef.current) setNavigating(false);
+      return;
+    }
+    if (navigationId === navigationIdRef.current) {
+      window.requestAnimationFrame(() => setNavigating(false));
+    }
+    pendingTocHrefRef.current = null;
     if (window.innerWidth <= 760) setLeftOpen(false);
   }
 
   function isCurrentTocItem(item: EpubTocItem) {
-    const itemHref = item.href.split("#")[0];
-    return Boolean(currentTocHref) && (currentTocHref.endsWith(itemHref) || itemHref.endsWith(currentTocHref));
+    if (!currentTocHref) return false;
+    if (item.href === currentTocHref) return true;
+    return !item.href.includes("#") && hrefMatches(currentTocHref, item.href);
   }
+
+  useEffect(() => {
+    if (!currentTocHref) return;
+    const item = Array.from(tocListRef.current?.querySelectorAll<HTMLElement>("[data-toc-href]") ?? [])
+      .find((element) => element.dataset.tocHref === currentTocHref);
+    item?.scrollIntoView({ block: "nearest" });
+  }, [currentTocHref]);
 
   function highlightedExcerpt(text: string) {
     const query = searchQuery.trim();
@@ -664,8 +708,8 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
           <button role="tab" aria-selected={sidebarTab === "search"} className={sidebarTab === "search" ? "active" : ""} onClick={() => setSidebarTab("search")}><Search size={16} />搜索</button>
         </div>
         {sidebarTab === "toc" ? (
-          <nav className="toc-list" aria-label="书籍目录">
-            {flattenToc(toc).map((item, index) => <button key={`${item.href}-${index}`} className={isCurrentTocItem(item) ? "active" : ""} aria-current={isCurrentTocItem(item) ? "location" : undefined} onClick={() => void openTocItem(item)}>{item.label.trim() || `章节 ${index + 1}`}</button>)}
+          <nav ref={tocListRef} className="toc-list" aria-label="书籍目录">
+            {flattenToc(toc).map((item, index) => <button key={`${item.href}-${index}`} data-toc-href={item.href} className={isCurrentTocItem(item) ? "active" : ""} aria-current={isCurrentTocItem(item) ? "location" : undefined} onClick={() => void openTocItem(item)}>{item.label.trim() || `章节 ${index + 1}`}</button>)}
             {!toc.length && <p>此 EPUB 没有提供目录。</p>}
           </nav>
         ) : (
@@ -679,8 +723,9 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         )}
       </aside>
 
-      <main className="epub-canvas">
+      <main className={navigating ? "epub-canvas navigating" : "epub-canvas"}>
         <div className="epub-stage" ref={stageRef} />
+        {navigating && <div className="reader-status navigation-status"><LoaderCircle className="spin" size={24} /></div>}
         {loading && <div className="reader-status"><LoaderCircle className="spin" size={26} /><span>正在解析与排版 EPUB...</span></div>}
         {error && <div className="reader-status error-state"><BookOpen size={30} /><strong>无法打开书籍</strong><span>{error}</span><button className="outline-button" onClick={() => void onBack()}>返回书架</button></div>}
       </main>
