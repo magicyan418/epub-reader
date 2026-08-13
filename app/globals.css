@@ -186,7 +186,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .epub-reader { height: 100vh; overflow: hidden; }
 .epub-canvas { position: fixed; inset: 61px 240px 0 280px; padding: 0; background: inherit; transition: left .2s ease, right .2s ease; }
 .epub-stage { width: 100%; height: 100%; overflow: hidden; background: inherit; }
-.epub-stage .epub-container { overflow-x: hidden !important; }
+.epub-stage .epub-container { overflow-x: hidden !important; overflow-anchor: none; }
 .epub-canvas.navigating .epub-stage { opacity: 0; }
 .navigation-status { z-index: 5; }
 .epub-stage > div, .epub-stage iframe { background: inherit !important; }

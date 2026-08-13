@@ -453,10 +453,19 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     const managerSettings = rendition.manager?.settings;
     if (!container || !managerSettings) return;
 
+    // Only raise the prefetch offset once the container has scrolled past it.
+    // Otherwise ContinuousManager.check() computes `start = scrollTop - offset < 0`
+    // and prepends the previous section right after a TOC jump; its counter()
+    // compensation then catapults the viewport to the end of the chapter.
+    const PREFETCH_OFFSET = 300;
+    const enablePrefetch = () => {
+      if (container.scrollTop >= PREFETCH_OFFSET) managerSettings.offset = PREFETCH_OFFSET;
+    };
+
     if (!scrollContainerRef.current) {
       const handleDownWheel = (event: WheelEvent) => {
         if (event.deltaY <= 0) return;
-        managerSettings.offset = 300;
+        enablePrefetch();
       };
       container.addEventListener("wheel", handleDownWheel, { passive: true });
       scrollContainerRef.current = container;
@@ -468,7 +477,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
       if (!document || frame.dataset.downPrefetchBound === "true") return;
       const handler = (event: WheelEvent) => {
         if (event.deltaY <= 0) return;
-        managerSettings.offset = 300;
+        enablePrefetch();
       };
       document.addEventListener("wheel", handler, { passive: true });
       frame.dataset.downPrefetchBound = "true";
