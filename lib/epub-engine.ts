@@ -30,6 +30,7 @@ export type EpubRendition = {
   on: {
     (event: "relocated", callback: (value: EpubLocation) => void): void;
     (event: "rendered", callback: () => void): void;
+    (event: "selected", callback: (cfi: string, contents: { window?: Window; document?: Document }) => void): void;
   };
   themes: {
     register: (name: string, rules: Record<string, Record<string, string>>) => void;

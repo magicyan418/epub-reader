@@ -18,3 +18,4 @@
 *.tsbuildinfo
 
 .pnpm-store
+.ace-tool/

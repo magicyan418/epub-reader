@@ -10,6 +10,16 @@ export type StoredEpubBook = {
   createdAt: number;
   updatedAt: number;
   file: Blob;
+  highlights?: BookHighlight[];
+};
+
+export type BookHighlight = {
+  id: string;
+  cfi: string;
+  text: string;
+  chapter: string;
+  href: string;
+  createdAt: number;
 };
 
 const DB_NAME = "luna-reader";
@@ -75,6 +85,16 @@ export async function updateStoredProgress(id: string, location: string, progres
     ...book,
     location,
     progress: Math.min(100, Math.max(0, Math.round(progress))),
+    updatedAt: Date.now(),
+  });
+}
+
+export async function updateStoredHighlights(id: string, highlights: BookHighlight[]): Promise<void> {
+  const book = await getStoredBook(id);
+  if (!book) return;
+  await saveStoredBook({
+    ...book,
+    highlights,
     updatedAt: Date.now(),
   });
 }

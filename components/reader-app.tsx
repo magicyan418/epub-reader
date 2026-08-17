@@ -2,6 +2,8 @@
 
 import {
   BookOpen,
+  Bookmark,
+  BookmarkPlus,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -29,7 +31,7 @@ import {
   X,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
-import { deleteStoredBook, getStoredBook, listStoredBooks, saveStoredBook, StoredEpubBook, updateStoredProgress } from "@/lib/epub-library";
+import { BookHighlight, deleteStoredBook, getStoredBook, listStoredBooks, saveStoredBook, StoredEpubBook, updateStoredHighlights, updateStoredProgress } from "@/lib/epub-library";
 import { blobUrlToDataUrl, EpubBook, EpubLocation, EpubRendition, EpubSearchResult, EpubTocItem, flattenToc, loadEpubEngine } from "@/lib/epub-engine";
 import { AlertDialog } from "@/components/ui/alert-dialog";
 
@@ -55,6 +57,32 @@ type UploadItem = {
 };
 
 type ReaderSearchResult = EpubSearchResult & { chapter: string };
+type PendingSelection = { cfi: string; text: string; chapter: string; href: string; x: number; y: number; placeBelow: boolean };
+
+function selectionAnchor(contents: { window?: Window }): Pick<PendingSelection, "x" | "y" | "placeBelow"> | null {
+  const win = contents.window;
+  const native = win?.getSelection();
+  if (!native || native.rangeCount === 0) return null;
+  const range = native.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  if (!rect.width && !rect.height) return null;
+  const frameRect = (win.frameElement as HTMLElement | null)?.getBoundingClientRect();
+  const left = (frameRect?.left ?? 0) + rect.left;
+  const top = (frameRect?.top ?? 0) + rect.top;
+  const bottom = (frameRect?.top ?? 0) + rect.bottom;
+  const x = Math.min(window.innerWidth - 88, Math.max(88, left + rect.width / 2));
+  const placeBelow = top < 72;
+  return {
+    x,
+    y: placeBelow ? Math.min(window.innerHeight - 56, bottom + 10) : Math.max(12, top - 8),
+    placeBelow,
+  };
+}
+
+function clearNativeSelections(root?: HTMLElement | null) {
+  window.getSelection()?.removeAllRanges();
+  root?.querySelectorAll("iframe").forEach((frame) => frame.contentWindow?.getSelection()?.removeAllRanges());
+}
 
 const navItems: { id: Exclude<View, "reader">; label: string; icon: typeof Library }[] = [
   { id: "library", label: "我的书架", icon: Library },
@@ -398,6 +426,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const epubRef = useRef<EpubBook | null>(null);
   const renditionRef = useRef<EpubRendition | null>(null);
   const highlightedCfiRef = useRef<string | null>(null);
+  const chapterTitleRef = useRef("正在打开...");
   const locationsPromiseRef = useRef<Promise<void> | null>(null);
   const currentCfiRef = useRef("");
   const flatTocRef = useRef<EpubTocItem[]>([]);
@@ -409,10 +438,12 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const [book, setBook] = useState<StoredEpubBook | null>(null);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
-  const [sidebarTab, setSidebarTab] = useState<"toc" | "search">("toc");
+  const [sidebarTab, setSidebarTab] = useState<"toc" | "search" | "highlights">("toc");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ReaderSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  const [highlights, setHighlights] = useState<BookHighlight[]>([]);
+  const [selection, setSelection] = useState<PendingSelection | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [chapterTitle, setChapterTitle] = useState("正在打开...");
   const [currentTocHref, setCurrentTocHref] = useState("");
@@ -509,6 +540,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     const currentChapter = resolvedChapterIndex >= 0 ? flatToc[resolvedChapterIndex] : undefined;
     if (currentChapter) {
       setChapterTitle(currentChapter.label.trim());
+      chapterTitleRef.current = currentChapter.label.trim();
       setCurrentTocHref(pendingHref ?? currentChapter.href);
     }
     if (pendingHref) {
@@ -544,8 +576,10 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         const stored = await getStoredBook(bookId);
         if (!stored || !stageRef.current) throw new Error("未找到这本 EPUB，请重新导入");
         setBook(stored);
+        setHighlights(stored.highlights ?? []);
         setProgress(stored.progress);
         setChapterTitle(stored.title);
+        chapterTitleRef.current = stored.title;
 
         const createBook = await loadEpubEngine();
         const epub = createBook(await stored.file.arrayBuffer());
@@ -572,7 +606,34 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
           if (!active) return;
           syncReadingLocation(location);
         });
-        rendition.on("rendered", () => installDownwardPrefetch(rendition));
+        rendition.on("rendered", () => {
+          installDownwardPrefetch(rendition);
+          (stored.highlights ?? []).forEach((highlight) => applyHighlight(rendition, highlight));
+          stageRef.current?.querySelectorAll<HTMLIFrameElement>("iframe").forEach((frame) => {
+            const document = frame.contentDocument;
+            if (!document || document.documentElement.dataset.selectionMenuBound === "true") return;
+            document.documentElement.dataset.selectionMenuBound = "true";
+            document.addEventListener("mousedown", () => setSelection(null));
+          });
+        });
+        rendition.on("selected", (cfi: string, contents: { window?: Window; document?: Document }) => {
+          const text = contents.window?.getSelection()?.toString().replace(/\s+/g, " ").trim() ?? "";
+          if (!text) {
+            setSelection(null);
+            return;
+          }
+          const location = rendition.currentLocation();
+          const anchor = selectionAnchor(contents);
+          setSelection({
+            cfi,
+            text,
+            chapter: chapterTitleRef.current,
+            href: location.start.href ?? "",
+            x: anchor?.x ?? window.innerWidth / 2,
+            y: anchor?.y ?? 80,
+            placeBelow: anchor?.placeBelow ?? false,
+          });
+        });
         await rendition.display(stored.location ?? undefined);
         if (!active) return;
         installDownwardPrefetch(rendition);
@@ -620,13 +681,23 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (focusMode) setFocusMode(false);
+        if (selection) setSelection(null);
+        else if (focusMode) setFocusMode(false);
         else setLeftOpen(false);
       }
     }
+    function dismissSelection() {
+      setSelection(null);
+    }
     window.addEventListener("keydown", handleKeyboard);
-    return () => window.removeEventListener("keydown", handleKeyboard);
-  }, [focusMode]);
+    window.addEventListener("resize", dismissSelection);
+    scrollContainerRef.current?.addEventListener("scroll", dismissSelection, { passive: true });
+    return () => {
+      window.removeEventListener("keydown", handleKeyboard);
+      window.removeEventListener("resize", dismissSelection);
+      scrollContainerRef.current?.removeEventListener("scroll", dismissSelection);
+    };
+  }, [focusMode, selection]);
 
   async function searchInsideBook() {
     const epub = epubRef.current;
@@ -661,6 +732,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   async function openSearchResult(result: ReaderSearchResult) {
     const rendition = renditionRef.current;
     if (!rendition) return;
+    setSelection(null);
     const previous = highlightedCfiRef.current;
     if (previous) rendition.annotations.remove(previous, "highlight");
     await rendition.display(result.cfi);
@@ -674,9 +746,54 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     if (window.innerWidth <= 760) setLeftOpen(false);
   }
 
+  function applyHighlight(rendition: EpubRendition, highlight: Pick<BookHighlight, "cfi">) {
+    rendition.annotations.highlight(highlight.cfi, {}, undefined, "luna-bookmark-highlight", {
+      fill: dark ? "#f5c84b" : "#f0b429",
+      "fill-opacity": dark ? "0.38" : "0.28",
+      "mix-blend-mode": dark ? "screen" : "multiply",
+    });
+  }
+
+  async function saveSelection() {
+    if (!selection || !book) return;
+    const existing = highlights.find((item) => item.cfi === selection.cfi);
+    if (existing) {
+      await removeHighlight(existing);
+      setSelection(null);
+      return;
+    }
+    const next: BookHighlight = { ...selection, id: crypto.randomUUID(), createdAt: Date.now() };
+    const nextHighlights = [next, ...highlights];
+    setHighlights(nextHighlights);
+    setBook({ ...book, highlights: nextHighlights });
+    await updateStoredHighlights(book.id, nextHighlights);
+    if (renditionRef.current) applyHighlight(renditionRef.current, next);
+    clearNativeSelections(stageRef.current);
+    setSelection(null);
+  }
+
+  async function removeHighlight(highlight: BookHighlight) {
+    const nextHighlights = highlights.filter((item) => item.id !== highlight.id);
+    setHighlights(nextHighlights);
+    setBook((current) => current ? { ...current, highlights: nextHighlights } : current);
+    renditionRef.current?.annotations.remove(highlight.cfi, "highlight");
+    await updateStoredHighlights(bookId, nextHighlights);
+  }
+
+  async function openHighlight(highlight: BookHighlight) {
+    const rendition = renditionRef.current;
+    if (!rendition) return;
+    await rendition.display(highlight.cfi);
+    syncReadingLocation(rendition.currentLocation());
+    applyHighlight(rendition, highlight);
+    setSidebarTab("highlights");
+    if (window.innerWidth <= 760) setLeftOpen(false);
+  }
+
   async function openTocItem(item: EpubTocItem) {
     const rendition = renditionRef.current;
     if (!rendition) return;
+    setSelection(null);
     const navigationId = ++navigationIdRef.current;
     setNavigating(true);
     pendingTocHrefRef.current = item.href;
@@ -739,19 +856,33 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         <div className="sidebar-tabs" role="tablist" aria-label="书籍导航">
           <button role="tab" aria-selected={sidebarTab === "toc"} className={sidebarTab === "toc" ? "active" : ""} onClick={() => setSidebarTab("toc")}><ListTree size={16} />目录</button>
           <button role="tab" aria-selected={sidebarTab === "search"} className={sidebarTab === "search" ? "active" : ""} onClick={() => setSidebarTab("search")}><Search size={16} />搜索</button>
+          <button role="tab" aria-selected={sidebarTab === "highlights"} className={sidebarTab === "highlights" ? "active" : ""} onClick={() => setSidebarTab("highlights")}><Bookmark size={16} />标记{highlights.length ? ` ${highlights.length}` : ""}</button>
         </div>
         {sidebarTab === "toc" ? (
           <nav ref={tocListRef} className="toc-list" aria-label="书籍目录">
             {flattenToc(toc).map((item, index) => <button key={`${item.href}-${index}`} data-toc-href={item.href} className={isCurrentTocItem(item) ? "active" : ""} aria-current={isCurrentTocItem(item) ? "location" : undefined} onClick={() => void openTocItem(item)}>{item.label.trim() || `章节 ${index + 1}`}</button>)}
             {!toc.length && <p>此 EPUB 没有提供目录。</p>}
           </nav>
-        ) : (
+        ) : sidebarTab === "search" ? (
           <div className="book-search">
             <div className="book-search-box"><Search size={16} /><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchInsideBook(); }} placeholder="搜索书内文字" /><button aria-label="搜索" onClick={() => void searchInsideBook()}>{searching ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={16} />}</button></div>
             <div className="search-results">
               {searchResults.map((result, index) => <button key={`${result.cfi}-${index}`} onClick={() => void openSearchResult(result)}><strong>{result.chapter}</strong><span>{highlightedExcerpt(result.excerpt)}</span></button>)}
               {!searching && searchQuery && !searchResults.length && <p>输入关键词并搜索整本书。</p>}
             </div>
+          </div>
+        ) : (
+          <div className="book-search highlight-list" aria-label="我的标记">
+            {!highlights.length && <div className="highlight-empty"><Bookmark size={22} /><p>暂无标记的句子</p></div>}
+            {highlights.map((highlight) => (
+              <article className="highlight-item" key={highlight.id}>
+                <button className="highlight-open" onClick={() => void openHighlight(highlight)}>
+                  <strong>{highlight.chapter}</strong>
+                  <span>{highlight.text}</span>
+                </button>
+                <button className="highlight-remove" aria-label="取消标记" title="取消标记" onClick={() => void removeHighlight(highlight)}><X size={15} /></button>
+              </article>
+            ))}
           </div>
         )}
       </aside>
@@ -768,6 +899,23 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         <section><h3>字号</h3><div className="font-stepper"><button aria-label="减小字号" onClick={() => setFontSize(Math.max(14, fontSize - 1))}><Minus size={16} /></button><span>{fontSize}px</span><button aria-label="增大字号" onClick={() => setFontSize(Math.min(24, fontSize + 1))}><Plus size={16} /></button></div></section>
         <section><h3>主题</h3><div className="theme-segment"><button className={!dark ? "active" : ""} aria-label="浅色主题" onClick={() => setDark(false)}><Sun size={17} />浅色</button><button className={dark ? "active" : ""} aria-label="深色主题" onClick={() => setDark(true)}><Moon size={17} />深色</button></div></section>
       </aside>
+      {selection && (
+        <div
+          className={selection.placeBelow ? "selection-menu below" : "selection-menu"}
+          style={{ left: selection.x, top: selection.y }}
+          role="dialog"
+          aria-label="选中文字操作"
+        >
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void saveSelection()}
+          >
+            {highlights.some((item) => item.cfi === selection.cfi) ? <Bookmark size={16} /> : <BookmarkPlus size={16} />}
+            <span>{highlights.some((item) => item.cfi === selection.cfi) ? "取消标记" : "标注"}</span>
+          </button>
+        </div>
+      )}
       {leftOpen && <button className="reader-sidebar-backdrop" aria-label="关闭左侧栏" onClick={() => setLeftOpen(false)} />}
       {focusMode && <button className="focus-exit" aria-label="退出阅读模式" title="退出阅读模式" onClick={() => setFocusMode(false)}><Minimize2 size={20} /></button>}
 
