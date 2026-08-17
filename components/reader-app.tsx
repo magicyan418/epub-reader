@@ -28,6 +28,8 @@ import {
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   X,
 } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -444,6 +446,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const [book, setBook] = useState<StoredEpubBook | null>(null);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
   const [sidebarTab, setSidebarTab] = useState<"toc" | "search" | "highlights">("toc");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ReaderSearchResult[]>([]);
@@ -677,12 +680,15 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   }, [dark, fontSize]);
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
+    // The canvas edges animate over 0.2s when panels collapse or expand.
+    // Relayout only after the transition settles; sizing the iframes from a
+    // mid-transition width leaves the article off-center once the animation ends.
+    const timer = window.setTimeout(() => {
       window.dispatchEvent(new Event("resize"));
       renditionRef.current?.resize();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [leftOpen, focusMode]);
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [leftOpen, rightOpen, focusMode]);
 
   useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
@@ -843,7 +849,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     );
   }
 
-  const readerClass = ["reader", "epub-reader", dark ? "dark" : "", leftOpen ? "" : "left-collapsed", focusMode ? "focus-mode" : ""].filter(Boolean).join(" ");
+  const readerClass = ["reader", "epub-reader", dark ? "dark" : "", leftOpen ? "" : "left-collapsed", rightOpen ? "" : "right-collapsed", focusMode ? "focus-mode" : ""].filter(Boolean).join(" ");
 
   return (
     <div className={readerClass}>
@@ -852,6 +858,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
         <strong title={book?.title}>{chapterTitle}</strong>
         <div className="reader-tools">
           <button aria-label={leftOpen ? "收起左侧栏" : "展开左侧栏"} title={leftOpen ? "收起左侧栏" : "展开左侧栏"} onClick={() => setLeftOpen(!leftOpen)}>{leftOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button>
+          <button className="right-panel-toggle" aria-label={rightOpen ? "收起右侧栏" : "展开右侧栏"} title={rightOpen ? "收起右侧栏" : "展开右侧栏"} onClick={() => setRightOpen(!rightOpen)}>{rightOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
           <button aria-label="进入阅读模式" title="阅读模式" onClick={() => setFocusMode(true)}><Maximize2 size={18} /></button>
         </div>
       </header>
