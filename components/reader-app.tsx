@@ -61,15 +61,21 @@ type PendingSelection = { cfi: string; text: string; chapter: string; href: stri
 
 function selectionAnchor(contents: { window?: Window }): Pick<PendingSelection, "x" | "y" | "placeBelow"> | null {
   const win = contents.window;
-  const native = win?.getSelection();
+  if (!win) return null;
+
+  const native = win.getSelection();
   if (!native || native.rangeCount === 0) return null;
+
   const range = native.getRangeAt(0);
   const rect = range.getBoundingClientRect();
   if (!rect.width && !rect.height) return null;
-  const frameRect = (win.frameElement as HTMLElement | null)?.getBoundingClientRect();
+
+  const frameRect = win.frameElement ? win.frameElement.getBoundingClientRect() : undefined;
+
   const left = (frameRect?.left ?? 0) + rect.left;
   const top = (frameRect?.top ?? 0) + rect.top;
-  const bottom = (frameRect?.top ?? 0) + rect.bottom;
+  const bottom = (frameRect?.bottom ?? 0) + rect.bottom;
+
   const x = Math.min(window.innerWidth - 88, Math.max(88, left + rect.width / 2));
   const placeBelow = top < 72;
   return {
