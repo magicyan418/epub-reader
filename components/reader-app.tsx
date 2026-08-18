@@ -680,17 +680,6 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   }, [dark, fontSize]);
 
   useEffect(() => {
-    // The canvas edges animate over 0.2s when panels collapse or expand.
-    // Relayout only after the transition settles; sizing the iframes from a
-    // mid-transition width leaves the article off-center once the animation ends.
-    const timer = window.setTimeout(() => {
-      window.dispatchEvent(new Event("resize"));
-      renditionRef.current?.resize();
-    }, 260);
-    return () => window.clearTimeout(timer);
-  }, [leftOpen, rightOpen, focusMode]);
-
-  useEffect(() => {
     function handleKeyboard(event: KeyboardEvent) {
       if (event.key === "Escape") {
         if (selection) setSelection(null);
