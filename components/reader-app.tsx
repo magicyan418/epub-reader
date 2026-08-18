@@ -69,7 +69,10 @@ function selectionAnchor(contents: { window?: Window }): Pick<PendingSelection, 
   if (!native || native.rangeCount === 0) return null;
 
   const range = native.getRangeAt(0);
-  const rect = range.getBoundingClientRect();
+  // For multi-line selections the bounding box center can hover over text
+  // that was never selected; anchor to the first line segment instead.
+  const lineRects = Array.from(range.getClientRects()).filter((item) => item.width > 0 || item.height > 0);
+  const rect = lineRects[0] ?? range.getBoundingClientRect();
   if (!rect.width && !rect.height) return null;
 
   const frameRect = win.frameElement ? win.frameElement.getBoundingClientRect() : undefined;
@@ -91,6 +94,8 @@ function clearNativeSelections(root?: HTMLElement | null) {
   window.getSelection()?.removeAllRanges();
   root?.querySelectorAll("iframe").forEach((frame) => frame.contentWindow?.getSelection()?.removeAllRanges());
 }
+
+const SELECTION_REVEAL_DELAY = 160;
 
 const navItems: { id: Exclude<View, "reader">; label: string; icon: typeof Library }[] = [
   { id: "library", label: "我的书架", icon: Library },
@@ -443,6 +448,9 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const downWheelHandlerRef = useRef<((event: WheelEvent) => void) | null>(null);
   const frameWheelHandlersRef = useRef<Array<{ document: Document; handler: (event: WheelEvent) => void }>>([]);
+  const pointerDownRef = useRef(false);
+  const pendingSelectionRef = useRef<PendingSelection | null>(null);
+  const selectionTimerRef = useRef<number | null>(null);
   const [book, setBook] = useState<StoredEpubBook | null>(null);
   const [toc, setToc] = useState<EpubTocItem[]>([]);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -465,6 +473,14 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
 
   function normalizeHref(href: string) {
     return href.split("#")[0].replace(/^\.\//, "");
+  }
+
+  function scheduleSelectionReveal(payload: PendingSelection) {
+    if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+    selectionTimerRef.current = window.setTimeout(() => {
+      selectionTimerRef.current = null;
+      setSelection(payload);
+    }, SELECTION_REVEAL_DELAY);
   }
 
   function hrefMatches(actual: string, expected: string) {
@@ -623,6 +639,18 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
             if (!document || document.documentElement.dataset.selectionMenuBound === "true") return;
             document.documentElement.dataset.selectionMenuBound = "true";
             document.addEventListener("mousedown", () => setSelection(null));
+            document.addEventListener("pointerdown", () => {
+              pointerDownRef.current = true;
+              pendingSelectionRef.current = null;
+            }, { passive: true });
+            document.addEventListener("pointerup", () => {
+              pointerDownRef.current = false;
+              const pending = pendingSelectionRef.current;
+              if (pending) {
+                pendingSelectionRef.current = null;
+                scheduleSelectionReveal(pending);
+              }
+            }, { passive: true });
           });
         });
         rendition.on("selected", (cfi: string, contents: { window?: Window; document?: Document }) => {
@@ -633,7 +661,7 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
           }
           const location = rendition.currentLocation();
           const anchor = selectionAnchor(contents);
-          setSelection({
+          const payload: PendingSelection = {
             cfi,
             text,
             chapter: chapterTitleRef.current,
@@ -641,7 +669,15 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
             x: anchor?.x ?? window.innerWidth / 2,
             y: anchor?.y ?? 80,
             placeBelow: anchor?.placeBelow ?? false,
-          });
+          };
+          // epub.js may report the selection while the pointer is still held
+          // down (its selectionchange debounce fires mid-drag). Hold the menu
+          // back until the drag actually ends.
+          if (pointerDownRef.current) {
+            pendingSelectionRef.current = payload;
+            return;
+          }
+          scheduleSelectionReveal(payload);
         });
         await rendition.display(stored.location ?? undefined);
         if (!active) return;
@@ -657,6 +693,10 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     void initialize();
     return () => {
       active = false;
+      if (selectionTimerRef.current) window.clearTimeout(selectionTimerRef.current);
+      selectionTimerRef.current = null;
+      pendingSelectionRef.current = null;
+      pointerDownRef.current = false;
       try { renditionRef.current?.destroy(); } catch { /* EPUB view may already be detached. */ }
       renditionRef.current = null;
       locationsPromiseRef.current = null;
@@ -690,12 +730,30 @@ function EpubReaderView({ bookId, fontSize, setFontSize, dark, setDark, onBack }
     function dismissSelection() {
       setSelection(null);
     }
+    // A drag that started inside the chapter iframe can be released over the
+    // surrounding page; track pointer state at the top level as well.
+    function handlePointerDown() {
+      pointerDownRef.current = true;
+      pendingSelectionRef.current = null;
+    }
+    function handlePointerUp() {
+      pointerDownRef.current = false;
+      const pending = pendingSelectionRef.current;
+      if (pending) {
+        pendingSelectionRef.current = null;
+        scheduleSelectionReveal(pending);
+      }
+    }
     window.addEventListener("keydown", handleKeyboard);
     window.addEventListener("resize", dismissSelection);
+    window.addEventListener("pointerdown", handlePointerDown, { passive: true });
+    window.addEventListener("pointerup", handlePointerUp, { passive: true });
     scrollContainerRef.current?.addEventListener("scroll", dismissSelection, { passive: true });
     return () => {
       window.removeEventListener("keydown", handleKeyboard);
       window.removeEventListener("resize", dismissSelection);
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("pointerup", handlePointerUp);
       scrollContainerRef.current?.removeEventListener("scroll", dismissSelection);
     };
   }, [focusMode, selection]);
