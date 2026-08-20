@@ -61,6 +61,8 @@ type UploadItem = {
 type ReaderSearchResult = EpubSearchResult & { chapter: string };
 type PendingSelection = { cfi: string; text: string; chapter: string; href: string; x: number; y: number; placeBelow: boolean };
 
+const BOOK_QUERY_KEY = "book";
+
 function selectionAnchor(contents: { window?: Window }): Pick<PendingSelection, "x" | "y" | "placeBelow"> | null {
   const win = contents.window;
   if (!win) return null;
@@ -102,8 +104,8 @@ const navItems: { id: Exclude<View, "reader">; label: string; icon: typeof Libra
   { id: "import", label: "导入书籍", icon: Upload },
 ];
 
-export default function ReaderApp() {
-  const [view, setView] = useState<View>("library");
+export default function ReaderApp({ initialBookId = null }: { initialBookId?: string | null }) {
+  const [view, setView] = useState<View>(initialBookId ? "reader" : "library");
   const [filter, setFilter] = useState<Filter>("全部");
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -111,16 +113,25 @@ export default function ReaderApp() {
   const [fontSize, setFontSize] = useState(17);
   const [readerDark, setReaderDark] = useState(false);
   const [storedBooks, setStoredBooks] = useState<StoredEpubBook[]>([]);
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(initialBookId);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const [libraryReady, setLibraryReady] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<DisplayBook | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    listStoredBooks()
-      .then(setStoredBooks)
-      .finally(() => setLibraryReady(true));
+    function syncViewFromUrl() {
+      const bookId = new URLSearchParams(window.location.search).get(BOOK_QUERY_KEY);
+      setSelectedBookId(bookId);
+      setView(bookId ? "reader" : "library");
+    }
+
+    syncViewFromUrl();
+    window.addEventListener("popstate", syncViewFromUrl);
+    return () => window.removeEventListener("popstate", syncViewFromUrl);
+  }, []);
+
+  useEffect(() => {
+    listStoredBooks().then(setStoredBooks);
   }, []);
 
   const allBooks = useMemo<DisplayBook[]>(() =>
@@ -142,7 +153,29 @@ export default function ReaderApp() {
     return sortAsc ? result : [...result].reverse();
   }, [allBooks, filter, query, sortAsc]);
 
+  const filterCounts: Record<Filter, number> = {
+    "全部": allBooks.length,
+    "正在阅读": allBooks.filter((book) => book.status === "正在阅读").length,
+    "已读完": allBooks.filter((book) => book.status === "已读完").length,
+    "未开始": allBooks.filter((book) => book.status === "未开始").length,
+  };
+
+  function updateBookUrl(bookId: string | null, replace = true) {
+    const url = new URL(window.location.href);
+    if (bookId) {
+      url.searchParams.set(BOOK_QUERY_KEY, bookId);
+    } else {
+      url.searchParams.delete(BOOK_QUERY_KEY);
+    }
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history[replace ? "replaceState" : "pushState"]({}, "", nextUrl);
+  }
+
   function goTo(next: View) {
+    if (next !== "reader") {
+      updateBookUrl(null);
+      setSelectedBookId(null);
+    }
     setView(next);
     setMenuOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -227,6 +260,7 @@ export default function ReaderApp() {
 
   function openBook(book: DisplayBook) {
     setSelectedBookId(book.id);
+    updateBookUrl(book.id, false);
     goTo("reader");
   }
 
@@ -262,14 +296,14 @@ export default function ReaderApp() {
         menuOpen={menuOpen}
         setMenuOpen={setMenuOpen}
         goTo={goTo}
+        totalBooks={filterCounts["全部"]}
+        readingBooks={filterCounts["正在阅读"]}
       />
       <main>
         {view === "library" && (
           <LibraryView
             visibleBooks={visibleBooks}
-            totalBooks={allBooks.length}
-            readingBooks={allBooks.filter((book) => book.status === "正在阅读").length}
-            libraryReady={libraryReady}
+            filterCounts={filterCounts}
             filter={filter}
             setFilter={setFilter}
             sortAsc={sortAsc}
@@ -301,17 +335,46 @@ export default function ReaderApp() {
   );
 }
 
-function Header({ view, query, setQuery, menuOpen, setMenuOpen, goTo }: {
+function Header({ view, query, setQuery, menuOpen, setMenuOpen, goTo, totalBooks, readingBooks }: {
   view: View;
   query: string;
   setQuery: (value: string) => void;
   menuOpen: boolean;
   setMenuOpen: (value: boolean) => void;
   goTo: (view: View) => void;
+  totalBooks: number;
+  readingBooks: number;
 }) {
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    function closeOnOutside(event: PointerEvent) {
+      if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setProfileOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [profileOpen]);
+
+  function goToFromProfile(next: View) {
+    setProfileOpen(false);
+    goTo(next);
+  }
+
   return (
     <header className="topbar">
-      <button className="brand" onClick={() => goTo("library")}>Luna Reader</button>
+      <button className="brand" aria-label="Yan EPUB，返回书架" onClick={() => goTo("library")}>
+        <span className="brand-mark"><img src="/icon.png" alt="" /></span>
+        <span className="brand-copy"><strong>Yan</strong><small>EPUB</small></span>
+      </button>
       <nav className={menuOpen ? "main-nav open" : "main-nav"} aria-label="主导航">
         {navItems.map(({ id, label, icon: Icon }) => (
           <button key={id} className={view === id ? "nav-item active" : "nav-item"} onClick={() => goTo(id)}>
@@ -325,7 +388,31 @@ function Header({ view, query, setQuery, menuOpen, setMenuOpen, goTo }: {
           <Search size={19} />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索书名、作者..." />
         </label>
-        <button className="icon-button profile-button" aria-label="个人账户" title="个人账户"><CircleUserRound size={23} /></button>
+        <div className="profile-area" ref={profileRef}>
+          <button
+            className={profileOpen ? "icon-button profile-button active" : "icon-button profile-button"}
+            aria-label="打开个人空间"
+            aria-expanded={profileOpen}
+            title="个人空间"
+            onClick={() => setProfileOpen(!profileOpen)}
+          >
+            <CircleUserRound size={23} />
+          </button>
+          {profileOpen && (
+            <section className="profile-popover" aria-label="个人空间">
+              <p className="profile-note">这是你的本地阅读空间，书籍和进度只保存在当前浏览器。</p>
+              <div className="profile-stats">
+                <span><strong>{totalBooks}</strong><small>本藏书</small></span>
+                <span><strong>{readingBooks}</strong><small>正在阅读</small></span>
+              </div>
+              <div className="profile-actions">
+                <button onClick={() => goToFromProfile("library")}><Library size={16} />查看书架</button>
+                <button onClick={() => goToFromProfile("import")}><Upload size={16} />导入书籍</button>
+              </div>
+              <small className="profile-footnote"><ShieldCheck size={14} />数据不会上传到服务器</small>
+            </section>
+          )}
+        </div>
         <button className="icon-button menu-button" aria-label="打开导航" title="导航" onClick={() => setMenuOpen(!menuOpen)}>
           {menuOpen ? <X size={22} /> : <Menu size={22} />}
         </button>
@@ -334,11 +421,9 @@ function Header({ view, query, setQuery, menuOpen, setMenuOpen, goTo }: {
   );
 }
 
-function LibraryView({ visibleBooks, totalBooks, readingBooks, libraryReady, filter, setFilter, sortAsc, setSortAsc, openBook, removeBook, openImport }: {
+function LibraryView({ visibleBooks, filterCounts, filter, setFilter, sortAsc, setSortAsc, openBook, removeBook, openImport }: {
   visibleBooks: DisplayBook[];
-  totalBooks: number;
-  readingBooks: number;
-  libraryReady: boolean;
+  filterCounts: Record<Filter, number>;
   filter: Filter;
   setFilter: (filter: Filter) => void;
   sortAsc: boolean;
@@ -350,14 +435,13 @@ function LibraryView({ visibleBooks, totalBooks, readingBooks, libraryReady, fil
   const filters: Filter[] = ["全部", "正在阅读", "已读完", "未开始"];
   return (
     <section className="page library-page">
-      <div className="page-heading">
-        <p className="eyebrow">个人图书馆</p>
-        <h1>我的书架</h1>
-        <p>{libraryReady ? <>你有 <strong>{totalBooks}</strong> 本藏书，其中 <strong className="accent">{readingBooks}</strong> 本正在阅读中。</> : "正在读取本地书架..."}</p>
-      </div>
       <div className="library-toolbar">
         <div className="segmented" aria-label="筛选书籍">
-          {filters.map((item) => <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>{item}</button>)}
+          {filters.map((item) => (
+            <button key={item} className={filter === item ? "active" : ""} onClick={() => setFilter(item)}>
+              <span>{item}</span><small>{filterCounts[item]}</small>
+            </button>
+          ))}
         </div>
         <button className="outline-button" onClick={() => setSortAsc(!sortAsc)}><SlidersHorizontal size={16} />排序方式</button>
       </div>
@@ -386,7 +470,6 @@ function LibraryView({ visibleBooks, totalBooks, readingBooks, libraryReady, fil
         ))}
         <button className="add-book" onClick={openImport}><Plus size={30} /><span>添加书籍</span></button>
       </div>
-      {visibleBooks.length === 0 && <div className="empty-state"><BookOpen size={32} /><p>没有找到匹配的书籍</p></div>}
     </section>
   );
 }
