@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Yan EPUB",
-  description: "Yan 的私密、本地 EPUB 阅读器。",
+  title: "EPUB阅读器",
+  description: "简洁、私密的本地 EPUB 阅读器。",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
